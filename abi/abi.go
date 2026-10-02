@@ -162,20 +162,17 @@ func parseSpdmMeasurementRequest(b []uint8) (*pb.SpdmMeasurementRequest, error) 
 		- Opaque Data (opaqueLength)
 		- Signature (signatureLength)
 */
-func parseSpdmMeasurementResponse(b []uint8, opaqueDataParser opaqueDataParser, signatureLength int) (response *pb.SpdmMeasurementResponse, parsedLength int, err error) {
-	defer func() {
-		if info := recover(); info != nil {
-			response = nil
-			err = &ParsingError{
-				Context: "parseSpdmMeasurementResponse(...)",
-				Info:    OutOfRangeRuntimeError,
-			}
-		}
-	}()
-
+func parseSpdmMeasurementResponse(b []uint8, opaqueDataParser opaqueDataParser, signatureLength int) (*pb.SpdmMeasurementResponse, int, error) {
 	data := clone(b) // Created an independent copy to make the interface less error-prone
 
 	offset := 0
+
+	if len(data) < SpdmMeasurementResponseHeaderSize {
+		return nil, 0, &ParsingError{
+			Context: "parseSpdmMeasurementResponse(...)",
+			Info:    OutOfRangeRuntimeError,
+		}
+	}
 
 	spdmVersion := data[offset : offset+SpdmVersionFieldSize]
 	offset += SpdmVersionFieldSize
@@ -201,9 +198,21 @@ func parseSpdmMeasurementResponse(b []uint8, opaqueDataParser opaqueDataParser, 
 	}
 	offset += measurementRecordLength
 
+	if len(data)-offset < NonceFieldSize {
+		return nil, offset, &ParsingError{
+			Context: "parseSpdmMeasurementResponse(...)",
+			Info:    OutOfRangeRuntimeError,
+		}
+	}
 	nonce := data[offset : offset+NonceFieldSize]
 	offset += NonceFieldSize
 
+	if len(data)-offset < OpaqueLengthFieldSize {
+		return nil, offset, &ParsingError{
+			Context: "parseSpdmMeasurementResponse(...)",
+			Info:    OutOfRangeRuntimeError,
+		}
+	}
 	opaqueLength := int32(binary.LittleEndian.Uint16(data[offset : offset+OpaqueLengthFieldSize]))
 	offset += OpaqueLengthFieldSize
 
@@ -214,10 +223,10 @@ func parseSpdmMeasurementResponse(b []uint8, opaqueDataParser opaqueDataParser, 
 	offset += int(opaqueLength)
 
 	signature, err := parseSignature(data[offset:], signatureLength)
-	offset += signatureLength
 	if err != nil {
 		return nil, offset, err
 	}
+	offset += signatureLength
 
 	return &pb.SpdmMeasurementResponse{
 		SpdmVersion:         spdmVersion,
@@ -232,18 +241,8 @@ func parseSpdmMeasurementResponse(b []uint8, opaqueDataParser opaqueDataParser, 
 	}, offset, nil
 }
 
-func parseMeasurementRecord(b []uint8, numberOfBlocks int, measurementRecordLength int) (measurementRecord *pb.MeasurementRecord, err error) {
-	defer func() {
-		if info := recover(); info != nil {
-			measurementRecord = nil
-			err = &ParsingError{
-				Context: "parseMeasurementRecord(...)",
-				Info:    OutOfRangeRuntimeError,
-			}
-		}
-	}()
-
-	if len(b) < measurementRecordLength {
+func parseMeasurementRecord(b []uint8, numberOfBlocks int, measurementRecordLength int) (*pb.MeasurementRecord, error) {
+	if measurementRecordLength < 0 || len(b) < measurementRecordLength {
 		return nil, &IncorrectLengthError{
 			Context:  "measurement record",
 			Expected: measurementRecordLength,
@@ -257,9 +256,16 @@ func parseMeasurementRecord(b []uint8, numberOfBlocks int, measurementRecordLeng
 
 	data := clone(b[:measurementRecordLength]) // Created an independent copy to make the interface less error-prone
 	offset := 0
-	measurementRecord = &pb.MeasurementRecord{}
+	measurementRecord := &pb.MeasurementRecord{}
 
 	for j := 0; j < numberOfBlocks; j++ {
+		if len(data)-offset < MeasurementBlockHeaderSize {
+			return nil, &ParsingError{
+				Context: "parseMeasurementRecord(...)",
+				Info:    OutOfRangeRuntimeError,
+			}
+		}
+
 		index := uint8(data[offset])
 		offset += MeasurementBlockIndexFieldSize
 
@@ -279,7 +285,11 @@ func parseMeasurementRecord(b []uint8, numberOfBlocks int, measurementRecordLeng
 			return nil, err
 		}
 
-		measurementBlock := &pb.MeasurementBlock{Index: int32(index), Specification: int32(measurementSpecification), DmtfMeasurement: dmtfMeasurement}
+		measurementBlock := &pb.MeasurementBlock{
+			Index:           int32(index),
+			Specification:   int32(measurementSpecification),
+			DmtfMeasurement: dmtfMeasurement,
+		}
 		offset += measurementSize
 
 		measurementRecord.MeasurementBlocks = append(measurementRecord.MeasurementBlocks, measurementBlock)
@@ -295,22 +305,19 @@ func parseMeasurementRecord(b []uint8, numberOfBlocks int, measurementRecordLeng
 	return measurementRecord, nil
 }
 
-func parseDmtfMeasurement(b []uint8, measurementSize int) (dmtfMeasurement *pb.DmtfMeasurement, parsedLength int, err error) {
-	defer func() {
-		if info := recover(); info != nil {
-			dmtfMeasurement = nil
-			err = &ParsingError{
-				Context: "parseDmtfMeasurement(...)",
-				Info:    OutOfRangeRuntimeError,
-			}
-		}
-	}()
-
-	if len(b) < measurementSize {
+func parseDmtfMeasurement(b []uint8, measurementSize int) (*pb.DmtfMeasurement, int, error) {
+	if measurementSize < 0 || len(b) < measurementSize {
 		return nil, 0, &IncorrectLengthError{
 			Context:  "dmtf measurement",
 			Expected: measurementSize,
 			Actual:   len(b),
+		}
+	}
+
+	if measurementSize < DmtfMeasurementHeaderSize {
+		return nil, 0, &ParsingError{
+			Context: "parseDmtfMeasurement(...)",
+			Info:    OutOfRangeRuntimeError,
 		}
 	}
 
@@ -323,14 +330,32 @@ func parseDmtfMeasurement(b []uint8, measurementSize int) (dmtfMeasurement *pb.D
 	valueSize := binary.LittleEndian.Uint16(data[offset : offset+DmtfSpecMeasurementValueSizeFieldSize])
 	offset += DmtfSpecMeasurementValueSizeFieldSize
 
+	if len(data)-offset < int(valueSize) {
+		return nil, 0, &ParsingError{
+			Context: "parseDmtfMeasurement(...)",
+			Info:    OutOfRangeRuntimeError,
+		}
+	}
+
 	value := data[offset : offset+int(valueSize)]
 	offset += int(valueSize)
 
-	return &pb.DmtfMeasurement{ValueType: valueType, ValueSize: int32(valueSize), Value: value}, offset, nil
+	if offset != measurementSize {
+		return nil, 0, &ParsingError{
+			Context: "parseDmtfMeasurement(...)",
+			Info:    fmt.Sprintf("something went wrong while parsing dmtf measurement. DMTF measurement bytes length is %d bytes, expected %d bytes", offset, measurementSize),
+		}
+	}
+
+	return &pb.DmtfMeasurement{
+		ValueType: valueType,
+		ValueSize: int32(valueSize),
+		Value:     value,
+	}, offset, nil
 }
 
 func parseSignature(b []uint8, signatureLength int) ([]byte, error) {
-	if len(b) < signatureLength {
+	if signatureLength < 0 || len(b) < signatureLength {
 		return nil, &IncorrectLengthError{
 			Context:  "signature",
 			Expected: signatureLength,
@@ -400,18 +425,8 @@ var gpuOpaqueDataTypes = map[uint16]pb.OpaqueDataType{
 type gpuOpaqueDataParser struct{}
 
 // ParseOpaqueData parses the given byte slice and returns the OpaqueData.
-func (g *gpuOpaqueDataParser) ParseOpaqueData(b []uint8, opaqueLength int) (od *pb.OpaqueData, err error) {
-	defer func() {
-		if info := recover(); info != nil {
-			od = nil
-			err = &ParsingError{
-				Context: "parseOpaqueData(...)",
-				Info:    OutOfRangeRuntimeError,
-			}
-		}
-	}()
-
-	if len(b) < opaqueLength {
+func (g *gpuOpaqueDataParser) ParseOpaqueData(b []uint8, opaqueLength int) (*pb.OpaqueData, error) {
+	if opaqueLength < 0 || len(b) < opaqueLength {
 		return nil, &IncorrectLengthError{
 			Context:  "opaque data",
 			Expected: opaqueLength,
@@ -421,14 +436,28 @@ func (g *gpuOpaqueDataParser) ParseOpaqueData(b []uint8, opaqueLength int) (od *
 
 	data := clone(b[:opaqueLength]) // Created an independent copy to make the interface less error-prone
 	offset := 0
-	od = &pb.OpaqueData{}
+	od := &pb.OpaqueData{}
 
 	for offset < opaqueLength {
+		if opaqueLength-offset < OpaqueDataHeaderSize {
+			return nil, &ParsingError{
+				Context: "parseOpaqueData(...)",
+				Info:    OutOfRangeRuntimeError,
+			}
+		}
+
 		rawDataType := binary.LittleEndian.Uint16(data[offset : offset+OpaqueDataTypeFieldSize])
 		offset += OpaqueDataTypeFieldSize
 
 		dataSize := int(binary.LittleEndian.Uint16(data[offset : offset+OpaqueDataSizeFieldSize]))
 		offset += OpaqueDataSizeFieldSize
+
+		if opaqueLength-offset < dataSize {
+			return nil, &ParsingError{
+				Context: "parseOpaqueData(...)",
+				Info:    OutOfRangeRuntimeError,
+			}
+		}
 
 		value := data[offset : offset+dataSize]
 		offset += dataSize
@@ -437,7 +466,9 @@ func (g *gpuOpaqueDataParser) ParseOpaqueData(b []uint8, opaqueLength int) (od *
 		if odt, ok := gpuOpaqueDataTypes[rawDataType]; ok {
 			dataType = odt
 		}
-		ofd := &pb.OpaqueFieldData{DataType: dataType}
+		ofd := &pb.OpaqueFieldData{
+			DataType: dataType,
+		}
 
 		if dataType == pb.OpaqueDataType_OPAQUE_FIELD_ID_MSRSCNT {
 			msrCounts, err := parseMeasurementCounts(value)
@@ -521,18 +552,8 @@ var switchOpaqueDataTypes = map[uint16]pb.OpaqueDataType{
 type switchOpaqueDataParser struct{}
 
 // ParseOpaqueData parses the given byte slice and returns the OpaqueData.
-func (s *switchOpaqueDataParser) ParseOpaqueData(b []uint8, opaqueLength int) (od *pb.OpaqueData, err error) {
-	defer func() {
-		if info := recover(); info != nil {
-			od = nil
-			err = &ParsingError{
-				Context: "parseOpaqueData(...)",
-				Info:    OutOfRangeRuntimeError,
-			}
-		}
-	}()
-
-	if len(b) < opaqueLength {
+func (s *switchOpaqueDataParser) ParseOpaqueData(b []uint8, opaqueLength int) (*pb.OpaqueData, error) {
+	if opaqueLength < 0 || len(b) < opaqueLength {
 		return nil, &IncorrectLengthError{
 			Context:  "opaque data",
 			Expected: opaqueLength,
@@ -542,14 +563,28 @@ func (s *switchOpaqueDataParser) ParseOpaqueData(b []uint8, opaqueLength int) (o
 
 	data := clone(b[:opaqueLength]) // Created an independent copy to make the interface less error-prone
 	offset := 0
-	od = &pb.OpaqueData{}
+	od := &pb.OpaqueData{}
 
 	for offset < opaqueLength {
+		if opaqueLength-offset < OpaqueDataHeaderSize {
+			return nil, &ParsingError{
+				Context: "parseOpaqueData(...)",
+				Info:    OutOfRangeRuntimeError,
+			}
+		}
+
 		rawDataType := binary.LittleEndian.Uint16(data[offset : offset+OpaqueDataTypeFieldSize])
 		offset += OpaqueDataTypeFieldSize
 
 		dataSize := int(binary.LittleEndian.Uint16(data[offset : offset+OpaqueDataSizeFieldSize]))
 		offset += OpaqueDataSizeFieldSize
+
+		if opaqueLength-offset < dataSize {
+			return nil, &ParsingError{
+				Context: "parseOpaqueData(...)",
+				Info:    OutOfRangeRuntimeError,
+			}
+		}
 
 		value := data[offset : offset+dataSize]
 		offset += dataSize
@@ -558,7 +593,9 @@ func (s *switchOpaqueDataParser) ParseOpaqueData(b []uint8, opaqueLength int) (o
 		if odt, ok := switchOpaqueDataTypes[rawDataType]; ok {
 			dataType = odt
 		}
-		ofd := &pb.OpaqueFieldData{DataType: dataType}
+		ofd := &pb.OpaqueFieldData{
+			DataType: dataType,
+		}
 
 		if dataType == pb.OpaqueDataType_OPAQUE_FIELD_ID_MSRSCNT {
 			msrCounts, err := parseMeasurementCounts(value)
