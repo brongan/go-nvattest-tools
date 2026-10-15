@@ -24,11 +24,61 @@ func TestReadFieldAsLittleEndian(t *testing.T) {
 }
 
 func TestFormatVbiosVersion(t *testing.T) {
-	version := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
-	got := FormatVbiosVersion(version, abi.GPU)
-	want := "04.03.02.01.05"
-	if got != want {
-		t.Errorf("formatVbiosVersion(%v) = %v, want %v", version, got, want)
+	tests := []struct {
+		name    string
+		version []byte
+		want    string
+		wantErr bool
+	}{
+		{name: "empty", version: nil, wantErr: true},
+		{name: "one_byte", version: []byte{0x01}, wantErr: true},
+		{name: "two_bytes", version: []byte{0xaa, 0xbb}, want: "aa.bb"},
+		{name: "three_bytes", version: []byte{0x01, 0x02, 0x03}, wantErr: true},
+		{name: "four_bytes", version: []byte{0x01, 0x02, 0x03, 0x04}, want: "02.01.03"},
+		// Field from a fuzzer crash input.
+		{name: "five_bytes", version: []byte{0x30, 0x00, 0x00, 0x00, 0x00}, wantErr: true},
+		{name: "six_bytes", version: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, want: "03.02.01.04"},
+		{name: "eight_bytes", version: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}, want: "04.03.02.01.05"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := FormatVbiosVersion(tc.version, abi.GPU)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("FormatVbiosVersion(%v, GPU) = %q, want error", tc.version, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("FormatVbiosVersion(%v, GPU) failed: %v", tc.version, err)
+			}
+			if got != tc.want {
+				t.Errorf("FormatVbiosVersion(%v, GPU) = %q, want %q", tc.version, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnsupportedAttestationType(t *testing.T) {
+	mode := abi.AttestationType(99)
+	var typeErr *abi.UnsupportedAttestationTypeError
+	if got, err := FormatVbiosVersion([]byte{0x01, 0x02}, mode); !errors.As(err, &typeErr) {
+		t.Errorf("FormatVbiosVersion(_, %v) = %q, %v, want UnsupportedAttestationTypeError", mode, got, err)
+	}
+	if got, err := vbiosRIMFileID(nil, mode); !errors.As(err, &typeErr) {
+		t.Errorf("vbiosRIMFileID(nil, %v) = %q, %v, want UnsupportedAttestationTypeError", mode, got, err)
+	}
+}
+
+func TestVbiosRIMFileIDInvalidVbiosVersion(t *testing.T) {
+	ofds := []*pb.OpaqueFieldData{
+		{
+			DataType: pb.OpaqueDataType_OPAQUE_FIELD_ID_VBIOS_VERSION,
+			Data:     &pb.OpaqueFieldData_Value{Value: []byte{0x01, 0x02, 0x03}},
+		},
+	}
+	if got, err := vbiosRIMFileID(ofds, abi.GPU); err == nil {
+		t.Errorf("vbiosRIMFileID(%v, GPU) = %q, want error", ofds, got)
 	}
 }
 
@@ -134,7 +184,10 @@ func TestVbiosRIMFileID(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := vbiosRIMFileID(tc.opaqueFieldDataList, tc.mode)
+			got, err := vbiosRIMFileID(tc.opaqueFieldDataList, tc.mode)
+			if err != nil {
+				t.Fatalf("vbiosRIMFileID(%v, %v) failed: %v", tc.opaqueFieldDataList, tc.mode, err)
+			}
 			if got != tc.want {
 				t.Errorf("vbiosRIMFileID(%v, %v) = %q, want %q", tc.opaqueFieldDataList, tc.mode, got, tc.want)
 			}
