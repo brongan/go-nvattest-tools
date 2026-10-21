@@ -75,7 +75,11 @@ func readFieldAsLittleEndian(data []byte) string {
 	return result.String()
 }
 
-// FormatVbiosVersion converts the input VBIOS version in byte format to xx.xx.xx.xx.xx format.
+// FormatVbiosVersion formats the VBIOS version field of an attestation report.
+// For abi.GPU, version must have an even length of at least 2 bytes, and the result is
+// dot-separated hex bytes, for example "96.00.9f.00.01".
+// For abi.SWITCH, the result is version as a string.
+// For other modes, it returns *abi.UnsupportedAttestationTypeError.
 func FormatVbiosVersion(version []byte, mode abi.AttestationType) (string, error) {
 	switch mode {
 	case abi.GPU:
@@ -89,8 +93,10 @@ func FormatVbiosVersion(version []byte, mode abi.AttestationType) (string, error
 
 // Reference: https://github.com/NVIDIA/nvtrust/blob/7960697fe7a36a1085656576622e386f4d52194d/guest_tools/gpu_verifiers/local_gpu_verifier/src/verifier/utils/__init__.py#L167
 func formatGpuVbiosVersion(version []byte) (string, error) {
-	// The format takes the last byte of the low half, so it needs at least 2 bytes. Each
-	// output part is one byte, so the low half must be a whole number of bytes.
+	// The output is a version string such as 96.00.9f.00.01. The first half of the input is
+	// a little-endian number that gives all parts except the last. The next byte gives the
+	// last part. Example: 01 02 03 04 05 06 07 08 -> 04.03.02.01.05.
+	// So the input must have an even number of bytes, at least 2.
 	if len(version) < 2 || len(version)%2 != 0 {
 		return "", fmt.Errorf("invalid GPU VBIOS version length %d: want an even number of bytes, at least 2", len(version))
 	}
